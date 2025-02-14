@@ -1,74 +1,94 @@
-name: Sync Leetcode
-
+name: 1. Update Solutions
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "45 22 * * *"
+  schedule: #run this workflow one after another (2 times total) if you want the solutions to be updated properly (the first time). otherwies, you can ignore and it will run daily
+    - cron: "45 15 * * *" # the text file wont update the initial run. from then on, it'll update properly. But loading all the solutions will take time
+    - cron: "55 15 * * *" 
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v3  
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
 
       - name: Sync LeetCode Solutions
-        id: sync_leetcode
+        id: sync
         uses: joshcai/leetcode-sync@v1.7
         with:
-          github-token: ${{ github.token }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           leetcode-csrf-token: ${{ secrets.LEETCODE_CSRF_TOKEN }}
           leetcode-session: ${{ secrets.LEETCODE_SESSION }}
           destination-folder: temp_solutions
           verbose: true
+          commit-header: "[LeetCode Sync]"
 
-      - name: Organize Solutions into Correct Folders
+      - name: Wait for Commit Propagation
         run: |
-          mkdir -p "Data Structures and Algorithms" "Database"
-          for folder in temp_solutions/*; do
-            if [ -d "$folder" ]; then
-              file=$(ls "$folder")
-              extension="${file##*.}"
-              if [[ "$extension" == "java" || "$extension" == "py" ]]; then
-                mv "$folder" "Data Structures and Algorithms/"
-              elif [[ "$extension" == "sql" ]]; then
-                mv "$folder" "Database/"
+          echo "Waiting for commit messages to propagate..."
+          sleep 15
+          git fetch --all
+      - name: Create Sync Details File
+        run: |
+          # Initialize file with header
+          echo "# LeetCode Solution Details" > sync_details.txt
+          if [ -d "temp_solutions" ]; then
+            while IFS= read -r file; do
+              dir=$(dirname "$file")
+              base=$(basename "$dir")
+              # Expect folder name format "NNNN-..."
+              if [[ "$base" =~ ^([0-9]+)- ]]; then
+                probnum="${BASH_REMATCH[1]}"
+                # Get latest commit message for this file
+                commit_msg=$(git log -1 --pretty=format:%B -- "$file" || echo "")
+                # Default values if not found
+                rt="0"
+                rtpct="100"
+                mem="0"
+                mempct="100"
+                # Look for "[LeetCode Sync]" in the commit message
+                if [[ "$commit_msg" =~ \[LeetCode\ Sync\] ]]; then
+                  if [[ "$commit_msg" =~ Runtime[[:space:]]*-[[:space:]]*([0-9.]+)[[:space:]]*ms[[:space:]]*\(([0-9.]+)%\) ]]; then
+                    rt="${BASH_REMATCH[1]}"
+                    rtpct="${BASH_REMATCH[2]}"
+                  fi
+                  if [[ "$commit_msg" =~ Memory[[:space:]]*-[[:space:]]*([0-9.]+)[[:space:]]*MB[[:space:]]*\(([0-9.]+)%\) ]]; then
+                    mem="${BASH_REMATCH[1]}"
+                    mempct="${BASH_REMATCH[2]}"
+                  fi
+                fi
+                echo "${probnum}:${rt},${rtpct},${mem},${mempct}" >> sync_details.txt
               fi
-            fi
-          done
-
-      - name: Commit Each Solution Separately
+            done < <(find temp_solutions -type f \( -name "*.py" -o -name "*.java" -o -name "*.cpp" -o -name "*.sql" \))
+            # Sort (except header) numerically by problem number
+            (head -n1 sync_details.txt && tail -n +2 sync_details.txt | sort -t: -k1n) > temp && mv temp sync_details.txt
+          fi
+      - name: Display Sync Details
+        run: |
+          echo "Contents of sync_details.txt:"
+          cat sync_details.txt
+      - name: Commit Sync Details
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          for folder in "Data Structures and Algorithms" "Database"; do
-            for solution in "$folder"/*; do
-              if [ -d "$solution" ]; then
-                LATEST_COMMIT_MSG=$(git log -1 --pretty=%B || echo "")
-                
-                RUNTIME_MS=$(echo "$LATEST_COMMIT_MSG" | grep -oP 'Runtime - \K\d+' || echo "0")
-                MEMORY_MB=$(echo "$LATEST_COMMIT_MSG" | grep -oP 'Memory - \K\d+' || echo "0")
-                RUNTIME_PCT=$(echo "$LATEST_COMMIT_MSG" | grep -oP '\(\K[0-9.]+(?=%\))' | head -1 || echo "100")
-                MEMORY_PCT=$(echo "$LATEST_COMMIT_MSG" | grep -oP '\(\K[0-9.]+(?=%\))' | tail -1 || echo "100")
-
-                if (( $(echo "$RUNTIME_PCT < 25" | bc -l) )); then RUNTIME_EMOJI="🚀"
-                elif (( $(echo "$RUNTIME_PCT < 50" | bc -l) )); then RUNTIME_EMOJI="⚡"
-                elif (( $(echo "$RUNTIME_PCT < 75" | bc -l) )); then RUNTIME_EMOJI="🔥"
-                else RUNTIME_EMOJI="🐢"; fi
-
-                if (( $(echo "$MEMORY_PCT < 25" | bc -l) )); then MEMORY_EMOJI="❄️"
-                elif (( $(echo "$MEMORY_PCT < 50" | bc -l) )); then MEMORY_EMOJI="🌱"
-                elif (( $(echo "$MEMORY_PCT < 75" | bc -l) )); then MEMORY_EMOJI="⚠️"
-                else MEMORY_EMOJI="❗️"; fi
-
-                COMMIT_MESSAGE="Runtime $RUNTIME_MS ms ($RUNTIME_PCT%) $RUNTIME_EMOJI | Memory $MEMORY_MB MB ($MEMORY_PCT%) $MEMORY_EMOJI - $(basename "$solution")"
-                
-                git add "$solution"
-                git commit -m "$COMMIT_MESSAGE"
-              fi
-            done
+          git add sync_details.txt
+          git commit -m "Update sync details" || echo "No sync detail changes"
+      - name: Push Changes
+        run: |
+          max_attempts=3
+          attempt=1
+          while [ $attempt -le $max_attempts ]; do
+            if git pull --rebase && git push; then
+              break
+            fi
+            echo "Push attempt $attempt failed. Retrying..."
+            attempt=$((attempt + 1))
+            sleep 5
           done
-
-          git push
+          if [ $attempt -gt $max_attempts ]; then
+            echo "Failed to push changes after $max_attempts attempts"
+            exit 1
+          fi
