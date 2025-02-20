@@ -11,7 +11,7 @@
    - `LEETCODE_CSRF_TOKEN` (from cookies)
 7. In Settings → Actions → General, enable 'Read and write permissions'
 8. The workflow runs daily at 15:00 UTC to update your stats. Go to the actins tab and ensure the workflows are not `disabled`
-9. If you want to run it manually, to see your stats and solutions organized quickly, then go to the `Actions` section and run the #1 successfully twice. Then run #2 and #3 and it will work.
+9. If you want to run it manually, to see your stats and solutions organized quickly, then go to the `Actions` section and run the #1 successfully **twice**. Then run #2 and #3 subsequently and it will work.
 
 ### If everything runs as expected, you will see something [like this](https://github.com/AdityaRao127/leetcode-solutions)
 
